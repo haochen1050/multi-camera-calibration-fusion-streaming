@@ -424,7 +424,8 @@ static void printHelp(const char* prog)
         << "  --plane_scale <f>     Size scale of image plane, 1.0 = full (default: 0.42)\n\n"
         << "Display:\n"
         << "  --no_frustums         Hide camera frustum wireframes\n"
-        << "  --t265                Enable T265 tracking (coordinate axes + trajectory trace)\n\n"
+        << "  --t265                Enable T265 tracking (coordinate axes + trajectory trace)\n"
+        << "  --rotate_frustums     Rotate camera frustums with T265 data (requires --t265)\n\n"
         << "Controls:\n"
         << "  Left drag   — rotate       Right drag/scroll — zoom\n"
         << "  Ctrl+drag   — pan          Q / close window  — stop\n";
@@ -444,6 +445,7 @@ int main(int argc, char** argv)
     bool  noZed   = false;
     bool  noFrustums = false;
     bool  useT265 = false;
+    bool  rotateFrustums = false;
     int   zedDevOverride = -1;
     double zedScale = 0.5;
     double planeDepth = 1.5;
@@ -467,6 +469,7 @@ int main(int argc, char** argv)
         else if (a == "--no_zed")       noZed = true;
         else if (a == "--no_frustums")  noFrustums = true;
         else if (a == "--t265")         useT265 = true;
+        else if (a == "--rotate_frustums") rotateFrustums = true;
         else if (a == "--res"         && i+1 < argc) {
             std::string r = argv[++i];
             auto x = r.find('x');
@@ -640,6 +643,7 @@ int main(int argc, char** argv)
 
     cv::VideoCapture zedCap;
     std::shared_ptr<o3d::geometry::TriangleMesh> zedMesh;
+    std::shared_ptr<o3d::geometry::TriangleMesh> zedFrustumMesh;
 
     if (!noZed) {
         int zedDev = zedDevOverride >= 0 ? zedDevOverride :
@@ -662,6 +666,43 @@ int main(int argc, char** argv)
                 zedMesh = createImagePlane(T_1_3L,
                     ciL.fx, ciL.fy, ciL.cx, ciL.cy,
                     ciL.w, ciL.h, planeDepth, planeScale);
+
+                // Build frustum lines from camera origin to plane corners
+                {
+                    auto origin = transformPt(T_1_3L, 0, 0, 0);
+                    auto& v = zedMesh->vertices_;  // tl, tr, br, bl
+                    std::vector<Eigen::Vector3d> pts = {origin, v[0], v[1], v[2], v[3]};
+                    int edges[][2] = {{0,1},{0,2},{0,3},{0,4}, {1,2},{2,3},{3,4},{4,1}};
+
+                    zedFrustumMesh = std::make_shared<o3d::geometry::TriangleMesh>();
+                    double r = 0.0015;
+                    for (auto& e : edges) {
+                        auto cyl = o3d::geometry::TriangleMesh::CreateCylinder(
+                            r, (pts[e[1]] - pts[e[0]]).norm(), 6, 1);
+                        Eigen::Vector3d dir = (pts[e[1]] - pts[e[0]]).normalized();
+                        Eigen::Vector3d up(0, 0, 1);
+                        Eigen::Vector3d mid = (pts[e[0]] + pts[e[1]]) * 0.5;
+                        Eigen::Matrix4d xf = Eigen::Matrix4d::Identity();
+                        Eigen::Vector3d axis = up.cross(dir);
+                        double angle = std::acos(std::clamp(up.dot(dir), -1.0, 1.0));
+                        if (axis.norm() > 1e-6) {
+                            axis.normalize();
+                            xf.block<3,3>(0,0) = Eigen::AngleAxisd(angle, axis).toRotationMatrix();
+                        } else if (up.dot(dir) < 0) {
+                            xf.block<3,3>(0,0) = Eigen::AngleAxisd(M_PI, Eigen::Vector3d(1,0,0)).toRotationMatrix();
+                        }
+                        xf.block<3,1>(0,3) = mid;
+                        cyl->Transform(xf);
+                        *zedFrustumMesh += *cyl;
+                    }
+                    // Sphere at camera origin
+                    auto sphere = o3d::geometry::TriangleMesh::CreateSphere(r * 3, 8);
+                    sphere->Translate(origin);
+                    *zedFrustumMesh += *sphere;
+
+                    zedFrustumMesh->PaintUniformColor({1.0, 0.0, 0.0});
+                    zedFrustumMesh->ComputeVertexNormals();
+                }
             } else {
                 std::cerr << " FAILED\n";
             }
@@ -675,7 +716,7 @@ int main(int argc, char** argv)
     rs2::pipeline t265pipe;
     bool t265active = false;
 
-    if (useT265) {
+    if (useT265 || rotateFrustums) {
         std::cout << "[INFO] Starting T265 (firmware load may take a few seconds)..." << std::flush;
         try {
             rs2::config t265cfg;
@@ -703,14 +744,47 @@ int main(int argc, char** argv)
     // Add frustums
     for (auto& f : frustums) vis.AddGeometry(f);
 
-    // Add ZED stereo image plane
+    // Add ZED stereo image plane + frustum
     if (zedMesh) vis.AddGeometry(zedMesh);
+    if (zedFrustumMesh) vis.AddGeometry(zedFrustumMesh);
+
+    // 180° flip around X to orient scene right-side-up (T265 mounted upside down)
+    // This negates Y and Z for all geometry
+    Eigen::Matrix3d sceneFlip = Eigen::Matrix3d::Identity();
+    if (rotateFrustums) {
+        sceneFlip(1,1) = -1; sceneFlip(2,2) = -1;
+
+        // Flip frustum vertices
+        for (auto& f : frustums)
+            for (auto& v : f->vertices_) v = sceneFlip * v;
+
+        // Flip ZED plane
+        if (zedMesh)
+            for (auto& v : zedMesh->vertices_) v = sceneFlip * v;
+
+        // Flip ZED frustum
+        if (zedFrustumMesh)
+            for (auto& v : zedFrustumMesh->vertices_) v = sceneFlip * v;
+    }
+
+    // Store flipped vertices as initial state for T265 rotation
+    std::vector<std::vector<Eigen::Vector3d>> frustumInitVerts;
+    std::vector<Eigen::Vector3d> zedPlaneInitVerts;
+    std::vector<Eigen::Vector3d> zedFrustumInitVerts;
+    if (rotateFrustums) {
+        for (auto& f : frustums)
+            frustumInitVerts.push_back(f->vertices_);
+        if (zedMesh && zedMesh->vertices_.size() == 4)
+            zedPlaneInitVerts = zedMesh->vertices_;
+        if (zedFrustumMesh)
+            zedFrustumInitVerts = zedFrustumMesh->vertices_;
+    }
 
     // T265 trajectory trace + moving axes
     auto t265trace = std::make_shared<o3d::geometry::LineSet>();
     auto t265axes  = std::make_shared<o3d::geometry::TriangleMesh>();
     bool t265trace_added = false;
-    if (t265active) {
+    if (t265active && useT265) {
         // Create initial small coordinate frame for T265 pose
         *t265axes = *o3d::geometry::TriangleMesh::CreateCoordinateFrame(0.05);
         vis.AddGeometry(t265axes);
@@ -726,6 +800,9 @@ int main(int argc, char** argv)
     int frameIdx = 0;
     bool viewReset = false;
     Eigen::Matrix4d t265_prev_pose = Eigen::Matrix4d::Identity();
+    Eigen::Matrix4d t265_initial_pose = Eigen::Matrix4d::Identity();
+    bool t265_initial_set = false;
+    Eigen::Matrix3d t265Rdelta = Eigen::Matrix3d::Identity();
 
     // Store initial ZED plane vertices for T265-driven rotation
     auto t265_axes_base = o3d::geometry::TriangleMesh::CreateCoordinateFrame(0.05);
@@ -743,41 +820,74 @@ int main(int argc, char** argv)
                     auto pose = pf.as<rs2::pose_frame>().get_pose_data();
                     Eigen::Matrix4d T = poseToMatrix(pose);
 
-                    // Update moving coordinate frame
-                    *t265axes = *t265_axes_base;
-                    t265axes->Transform(T);
-                    vis.UpdateGeometry(t265axes);
+                    // Update moving coordinate frame + trace (only if --t265)
+                    if (useT265) {
+                        *t265axes = *t265_axes_base;
+                        t265axes->Transform(T);
+                        vis.UpdateGeometry(t265axes);
 
-                    // Add to trajectory trace (every few cm to avoid clutter)
-                    Eigen::Vector3d pos(T(0,3), T(1,3), T(2,3));
-                    if (!t265_has_trace || (pos - t265_last_trace_pt).norm() > 0.005) {
-                        if (t265_has_trace) {
-                            size_t n = t265trace->points_.size();
-                            t265trace->points_.push_back(pos);
-                            t265trace->lines_.push_back({(int)n - 1, (int)n});
-                            // Color by confidence: green=high, yellow=medium, red=low
-                            double g = std::min(1.0, pose.tracker_confidence / 3.0);
-                            t265trace->colors_.push_back({1.0 - g, g, 0.2});
-                        } else {
-                            t265trace->points_.push_back(pos);
-                        }
-                        t265_last_trace_pt = pos;
-                        t265_has_trace = true;
-                        if (!t265trace_added && !t265trace->lines_.empty()) {
-                            vis.AddGeometry(t265trace);
-                            t265trace_added = true;
-                        } else if (t265trace_added) {
-                            vis.UpdateGeometry(t265trace);
+                        Eigen::Vector3d pos(T(0,3), T(1,3), T(2,3));
+                        if (!t265_has_trace || (pos - t265_last_trace_pt).norm() > 0.005) {
+                            if (t265_has_trace) {
+                                size_t n = t265trace->points_.size();
+                                t265trace->points_.push_back(pos);
+                                t265trace->lines_.push_back({(int)n - 1, (int)n});
+                                double g = std::min(1.0, pose.tracker_confidence / 3.0);
+                                t265trace->colors_.push_back({1.0 - g, g, 0.2});
+                            } else {
+                                t265trace->points_.push_back(pos);
+                            }
+                            t265_last_trace_pt = pos;
+                            t265_has_trace = true;
+                            if (!t265trace_added && !t265trace->lines_.empty()) {
+                                vis.AddGeometry(t265trace);
+                                t265trace_added = true;
+                            } else if (t265trace_added) {
+                                vis.UpdateGeometry(t265trace);
+                            }
                         }
                     }
 
-                    // T265 shown as independent axes + trace only
+                    // Compute T265 delta and rotate frustums/plane/cloud
+                    if (rotateFrustums) {
+                        if (!t265_initial_set) {
+                            t265_initial_pose = T;
+                            t265_initial_set = true;
+                        }
+                        Eigen::Matrix3d Rnow = T.block<3,3>(0,0);
+                        Eigen::Matrix3d R0 = t265_initial_pose.block<3,3>(0,0);
+                        // Relative delta, conjugated into flipped scene frame
+                        Eigen::Matrix3d Rdelta_t265 = Rnow * R0.transpose();
+                        t265Rdelta = sceneFlip * Rdelta_t265 * sceneFlip;
+                        Eigen::Matrix3d Rdelta = t265Rdelta;
+
+                        for (size_t fi = 0; fi < frustumInitVerts.size(); ++fi) {
+                            auto& fv = frustums[fi]->vertices_;
+                            for (size_t i = 0; i < fv.size(); ++i)
+                                fv[i] = Rdelta * frustumInitVerts[fi][i];
+                            vis.UpdateGeometry(frustums[fi]);
+                        }
+
+                        if (zedMesh && !zedPlaneInitVerts.empty()) {
+                            for (size_t i = 0; i < zedPlaneInitVerts.size(); ++i)
+                                zedMesh->vertices_[i] = Rdelta * zedPlaneInitVerts[i];
+                            vis.UpdateGeometry(zedMesh);
+                        }
+
+                        if (zedFrustumMesh && !zedFrustumInitVerts.empty()) {
+                            auto& fv = zedFrustumMesh->vertices_;
+                            for (size_t i = 0; i < fv.size(); ++i)
+                                fv[i] = Rdelta * zedFrustumInitVerts[i];
+                            vis.UpdateGeometry(zedFrustumMesh);
+                        }
+                    }
 
                     // Print pose info periodically
                     if (frameIdx % 90 == 0) {
+                        Eigen::Vector3d p(T(0,3), T(1,3), T(2,3));
                         auto rv = Eigen::AngleAxisd(T.block<3,3>(0,0));
                         std::cout << "\r  T265: t=[" << std::fixed << std::setprecision(3)
-                                  << pos.x() << "," << pos.y() << "," << pos.z()
+                                  << p.x() << "," << p.y() << "," << p.z()
                                   << "] rot=" << std::setprecision(1)
                                   << rv.angle() * 180.0 / M_PI << "deg"
                                   << " conf=" << pose.tracker_confidence
@@ -805,21 +915,27 @@ int main(int argc, char** argv)
             cloud->colors_ = down->colors_;
         }
 
+        // Flip + rotate point cloud to match plane/frustums
+        if (rotateFrustums) {
+            Eigen::Matrix3d R = t265_initial_set ? t265Rdelta * sceneFlip : sceneFlip;
+            for (auto& p : cloud->points_)
+                p = R * p;
+        }
+
         vis.UpdateGeometry(cloud);
 
         // Update ZED left camera image plane
         if (zedCap.isOpened() && zedMesh) {
             cv::Mat sbs;
             if (zedCap.read(sbs) && sbs.cols >= 2560 && sbs.rows >= 720) {
-                // Extract left half, convert BGR → RGB
-                cv::Mat leftBGR = sbs(cv::Rect(0, 0, 1280, 720));
-                cv::Mat leftRGB;
-                cv::cvtColor(leftBGR, leftRGB, cv::COLOR_BGR2RGB);
+                // Full side-by-side frame, convert BGR → RGB
+                cv::Mat fullRGB;
+                cv::cvtColor(sbs, fullRGB, cv::COLOR_BGR2RGB);
 
                 if (zedScale < 1.0)
-                    cv::resize(leftRGB, leftRGB, cv::Size(), zedScale, zedScale);
+                    cv::resize(fullRGB, fullRGB, cv::Size(), zedScale, zedScale);
 
-                updateImagePlaneTexture(*zedMesh, leftRGB);
+                updateImagePlaneTexture(*zedMesh, fullRGB);
                 vis.UpdateGeometry(zedMesh);
             }
         }

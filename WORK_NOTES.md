@@ -384,6 +384,7 @@ Open3D's `Visualizer` class.
 | `--no_zed`      | off            | Skip ZED camera image plane              |
 | `--no_frustums` | off            | Skip camera frustum wireframes           |
 | `--t265`        | off            | Enable T265 tracking (axes + trajectory) |
+| `--rotate_frustums` | off        | Rotate scene with T265 data (auto-enables T265) |
 | `--zed_dev`     | from config    | Override ZED V4L2 device index           |
 | `--zed_scale`   | 0.5            | ZED texture resolution scale             |
 | `--plane_depth` | 1.5 m          | ZED image plane distance from camera     |
@@ -404,23 +405,26 @@ bandwidth. L515 cameras that don't support the requested resolution will fall ba
 ### Features
 
 - **Point cloud fusion:** 4 RealSense cameras (cam1/cam2/cam4/cam5) fused into cam1 frame
-- **ZED image plane:** Textured quad showing ZED left camera RGB, projected at calibrated position
+- **ZED image plane:** Textured quad showing ZED side-by-side stereo RGB, with red frustum wireframe connecting camera origin to plane corners
   - Size/distance adjustable via `--plane_depth` and `--plane_scale`
 - **Camera frustums:** Cylinder-based wireframe frustums for all 6 camera positions (cam1, cam2, cam3L, cam3R, cam4, cam5), toggleable with `--no_frustums`
-- **T265 tracking:** Independent visualization showing moving coordinate axes at T265 pose + trajectory trace colored by confidence (green=high, red=low). Does NOT transform other geometry (T265-to-camera extrinsics not calibrated).
+- **T265 tracking:** Independent visualization showing moving coordinate axes at T265 pose + trajectory trace colored by confidence (green=high, red=low)
+- **T265 scene rotation (`--rotate_frustums`):** Rotates the entire scene (point cloud, ZED plane, frustums) based on T265 orientation data. Includes 180° X-flip to compensate for upside-down T265 mounting. `--t265` and `--rotate_frustums` are independent flags — can use either or both.
 
 ### Architecture
 
 ```
 main loop (Open3D PollEvents)
-  ├── T265 pose update (if --t265)
-  │     ├── update coordinate frame at current pose
-  │     └── append trajectory trace point (colored by confidence)
+  ├── T265 pose update (if --t265 or --rotate_frustums)
+  │     ├── update coordinate frame + trace (if --t265)
+  │     ├── compute delta rotation from initial pose
+  │     └── rotate frustums, ZED plane, ZED frustum (if --rotate_frustums)
   ├── appendCam() × N active RealSense cameras
   │     ├── wait_for_frames(200ms)
   │     ├── align depth → color frame
   │     └── for each pixel at stride:
   │           rs2_deproject_pixel_to_point → apply T_1_N → append
+  ├── Apply scene flip + T265 rotation to point cloud (if --rotate_frustums)
   ├── UpdateGeometry(cloud)
   ├── ZED V4L2 frame → update image plane texture
   └── ResetViewPoint(true)  [first frame only — fits view to data]
@@ -521,11 +525,9 @@ relative paths (`configs/`, `data/`, `results/`) resolve correctly.
 2. **cam3 (ZED) depth in fuse_stream** — currently only cam1/cam2/cam4/cam5 are fused.
    Would require ZED SDK or V4L2 depth access to include cam3.
 
-3. **T265-to-camera extrinsic calibration** — T265 tracking is shown independently (axes +
-   trace) because the rigid transform between T265 and the camera array is unknown. Options:
-   - Physical measurement from 3D-printed rig CAD
-   - Hand-eye calibration (limited by T265 V-SLAM drift ~150mm)
-   - Currently NOT applied to scene geometry
+3. **T265-to-camera extrinsic calibration** — T265 rotation is applied via `--rotate_frustums`
+   but the rigid transform between T265 and camera array is unknown (only relative delta used).
+   T265 is mounted upside down — compensated with 180° X-flip in code.
 
 4. **Install ZED SDK** (optional) — would enable cam3 depth in `fuse_stream` and allow
    `fuse_and_view` to build.
