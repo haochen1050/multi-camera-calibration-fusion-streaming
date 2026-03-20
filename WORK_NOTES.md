@@ -374,8 +374,8 @@ Open3D's `Visualizer` class.
 |-----------------|----------------|------------------------------------------|
 | `--cameras`     | cam1,cam2,cam4,cam5 | Comma-separated list of cameras     |
 | `--stride`      | 4              | Process every Nth pixel (higher = fewer points, faster) |
-| `--min_depth`   | 0.25 m         | Ignore depth below this (L515 min=0.25m) |
-| `--max_depth`   | 4.0 m          | Ignore depth above this                  |
+| `--min_depth`   | 0.25 m         | Min depth for L515. D405 fixed at 0.07m  |
+| `--max_depth`   | 4.0 m          | Max depth for L515. D405 capped at 0.5m  |
 | `--voxel`       | 0 (off)        | Voxel downsample size in metres          |
 | `--res`         | auto           | Stream resolution WxH (e.g. `640x480`)   |
 | `--fps`         | 15             | Stream framerate                         |
