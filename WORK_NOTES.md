@@ -378,11 +378,11 @@ Open3D's `Visualizer` class.
 | `--max_depth`   | 4.0 m          | Max depth for L515. D405 capped at 0.5m  |
 | `--voxel`       | 0 (off)        | Voxel downsample size in metres          |
 | `--res`         | auto           | Stream resolution WxH (e.g. `640x480`)   |
-| `--fps`         | 15             | Stream framerate                         |
+| `--fps`         | 30             | Stream framerate                         |
 | `--config`      | configs/cameras.yaml | Camera serial config                |
 | `--transforms`  | results/extrinsics/all_to_cam1_extra.yaml | Optimized poses |
 | `--no_zed`      | off            | Skip ZED camera image plane              |
-| `--no_frustums` | off            | Skip camera frustum wireframes           |
+| `--frustums`    | off            | Show camera frustum wireframes (hidden by default) |
 | `--t265`        | off            | Enable T265 tracking (axes + trajectory) |
 | `--rotate_frustums` | off        | Rotate scene with T265 data (auto-enables T265) |
 | `--zed_dev`     | from config    | Override ZED V4L2 device index           |
@@ -407,9 +407,9 @@ bandwidth. L515 cameras that don't support the requested resolution will fall ba
 - **Point cloud fusion:** 4 RealSense cameras (cam1/cam2/cam4/cam5) fused into cam1 frame
 - **ZED image plane:** Textured quad showing ZED side-by-side stereo RGB, with red frustum wireframe connecting camera origin to plane corners
   - Size/distance adjustable via `--plane_depth` and `--plane_scale`
-- **Camera frustums:** Cylinder-based wireframe frustums for all 6 camera positions (cam1, cam2, cam3L, cam3R, cam4, cam5), toggleable with `--no_frustums`
+- **Camera frustums:** Cylinder-based wireframe frustums for all 6 camera positions (cam1, cam2, cam3L, cam3R, cam4, cam5), hidden by default, enable with `--frustums`
 - **T265 tracking:** Independent visualization showing moving coordinate axes at T265 pose + trajectory trace colored by confidence (green=high, red=low)
-- **T265 scene rotation (`--rotate_frustums`):** Rotates the entire scene (point cloud, ZED plane, frustums) based on T265 orientation data. Includes 180° X-flip to compensate for upside-down T265 mounting. `--t265` and `--rotate_frustums` are independent flags — can use either or both.
+- **T265 scene rotation (`--rotate_frustums`):** Rotates and translates the entire scene (point cloud, ZED plane, frustums) based on T265 6DoF pose data. Uses raw T265 delta (no coordinate correction needed). Scene is flipped right-side-up with `sceneFlip = diag(1,-1,-1)` unconditionally to compensate for upside-down T265 mounting. `--t265` and `--rotate_frustums` are independent flags — can use either or both.
 
 ### Architecture
 
@@ -525,9 +525,11 @@ relative paths (`configs/`, `data/`, `results/`) resolve correctly.
 2. **cam3 (ZED) depth in fuse_stream** — currently only cam1/cam2/cam4/cam5 are fused.
    Would require ZED SDK or V4L2 depth access to include cam3.
 
-3. **T265-to-camera extrinsic calibration** — T265 rotation is applied via `--rotate_frustums`
-   but the rigid transform between T265 and camera array is unknown (only relative delta used).
-   T265 is mounted upside down — compensated with 180° X-flip in code.
+3. **T265-to-camera extrinsic calibration** — T265 pose is applied via `--rotate_frustums`
+   (both rotation and translation) but the rigid transform between T265 and camera array is
+   unknown (only relative delta from initial pose is used). T265 is mounted upside down —
+   scene is compensated with unconditional `sceneFlip = diag(1,-1,-1)` applied to all geometry.
+   Raw T265 delta requires no coordinate correction.
 
 4. **Install ZED SDK** (optional) — would enable cam3 depth in `fuse_stream` and allow
    `fuse_and_view` to build.

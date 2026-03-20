@@ -423,7 +423,7 @@ static void printHelp(const char* prog)
         << "  --plane_depth <m>     Distance of image plane from ZED camera (default: 1.5)\n"
         << "  --plane_scale <f>     Size scale of image plane, 1.0 = full (default: 0.42)\n\n"
         << "Display:\n"
-        << "  --no_frustums         Hide camera frustum wireframes\n"
+        << "  --frustums            Show camera frustum wireframes (hidden by default)\n"
         << "  --t265                Enable T265 tracking (coordinate axes + trajectory trace)\n"
         << "  --rotate_frustums     Rotate entire scene with T265 data (auto-enables T265)\n"
         << "  --rig_trace           Show rig origin axes + trajectory trace (auto-enables T265)\n\n"
@@ -444,7 +444,7 @@ int main(int argc, char** argv)
     int   stride  = 4;      // default 4 — lighter workload
     double voxel  = 0.0;
     bool  noZed   = false;
-    bool  noFrustums = false;
+    bool  noFrustums = true;
     bool  useT265 = false;
     bool  rotateFrustums = false;
     bool  showRigTrace = false;
@@ -469,7 +469,7 @@ int main(int argc, char** argv)
         else if (a == "--plane_depth" && i+1 < argc) planeDepth     = std::stod(argv[++i]);
         else if (a == "--plane_scale" && i+1 < argc) planeScale     = std::stod(argv[++i]);
         else if (a == "--no_zed")       noZed = true;
-        else if (a == "--no_frustums")  noFrustums = true;
+        else if (a == "--frustums")     noFrustums = false;
         else if (a == "--t265")         useT265 = true;
         else if (a == "--rotate_frustums") rotateFrustums = true;
         else if (a == "--rig_trace")       showRigTrace = true;
@@ -876,13 +876,12 @@ int main(int argc, char** argv)
                             t265_initial_pose = T;
                             t265_initial_set = true;
                         }
-                        Eigen::Matrix3d Rnow = T.block<3,3>(0,0);
-                        Eigen::Matrix3d R0 = t265_initial_pose.block<3,3>(0,0);
-                        Eigen::Matrix3d Rdelta_t265 = Rnow * R0.transpose();
-                        t265Rdelta = sceneFlip * Rdelta_t265 * sceneFlip;
+                        // Raw T265 delta — no correction, testing baseline
+                        t265Rdelta = T.block<3,3>(0,0) *
+                            t265_initial_pose.block<3,3>(0,0).transpose();
                         Eigen::Vector3d tnow(T(0,3), T(1,3), T(2,3));
                         Eigen::Vector3d t0(t265_initial_pose(0,3), t265_initial_pose(1,3), t265_initial_pose(2,3));
-                        t265Tdelta = sceneFlip * (tnow - t0);
+                        t265Tdelta = tnow - t0;
                     }
 
                     // Update rig origin axes + trajectory trace
