@@ -1,6 +1,6 @@
-# Multi-Camera ChArUco Calibration
+# Multi-Camera Calibration, Fusion & Streaming
 
-Extrinsic calibration and real-time point cloud fusion for a 5-camera RGBD array with 6DoF pose tracking.
+Extrinsic calibration, real-time point cloud fusion, and 3D streaming visualization for a 5-camera RGBD array with 6DoF pose tracking.
 
 ## Camera Array
 
